@@ -3,6 +3,7 @@ package platform
 import (
 	"reflect"
 	"testing"
+	"time"
 )
 
 func env(pairs map[string]string) func(string) string {
@@ -91,6 +92,47 @@ func TestTelemetryCanBeTurnedOff(t *testing.T) {
 	}
 }
 
+func TestResilienceDefaultsAndOverrides(t *testing.T) {
+	defaults, err := LoadConfig(env(nil))
+	if err != nil {
+		t.Fatalf("LoadConfig defaults: %v", err)
+	}
+	wantDefaults := Resilience{
+		RedisAddress:             "localhost:6379",
+		CacheTTL:                 time.Hour,
+		PartnerTimeout:           2 * time.Second,
+		BreakerConsecutiveErrors: 3,
+		BreakerOpenTimeout:       30 * time.Second,
+		BreakerHalfOpenRequests:  2,
+	}
+	if defaults.Resilience != wantDefaults {
+		t.Errorf("default resilience %+v, want %+v", defaults.Resilience, wantDefaults)
+	}
+
+	overrides, err := LoadConfig(env(map[string]string{
+		"REDIS_ADDRESS":              "redis:6379",
+		"QUOTE_CACHE_TTL":            "30m",
+		"PARTNER_TIMEOUT":            "1500ms",
+		"BREAKER_CONSECUTIVE_ERRORS": "4",
+		"BREAKER_OPEN_TIMEOUT":       "45s",
+		"BREAKER_HALF_OPEN_REQUESTS": "3",
+	}))
+	if err != nil {
+		t.Fatalf("LoadConfig overrides: %v", err)
+	}
+	wantOverrides := Resilience{
+		RedisAddress:             "redis:6379",
+		CacheTTL:                 30 * time.Minute,
+		PartnerTimeout:           1500 * time.Millisecond,
+		BreakerConsecutiveErrors: 4,
+		BreakerOpenTimeout:       45 * time.Second,
+		BreakerHalfOpenRequests:  3,
+	}
+	if overrides.Resilience != wantOverrides {
+		t.Errorf("overridden resilience %+v, want %+v", overrides.Resilience, wantOverrides)
+	}
+}
+
 func TestTelemetryOffSkipsEndpointValidation(t *testing.T) {
 	if _, err := LoadConfig(env(map[string]string{
 		"OTEL_SDK_DISABLED":           "true",
@@ -112,6 +154,11 @@ func TestInvalidConfigFails(t *testing.T) {
 		"collector without scheme":           {"OTEL_EXPORTER_OTLP_ENDPOINT": "otel-collector:4317"},
 		"collector without host":             {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://"},
 		"OTEL_SDK_DISABLED is not a boolean": {"OTEL_SDK_DISABLED": "maybe"},
+		"empty Redis address":                {"REDIS_ADDRESS": "   "},
+		"invalid cache TTL":                  {"QUOTE_CACHE_TTL": "nope"},
+		"zero partner timeout":               {"PARTNER_TIMEOUT": "0s"},
+		"zero breaker threshold":             {"BREAKER_CONSECUTIVE_ERRORS": "0"},
+		"invalid half-open request count":    {"BREAKER_HALF_OPEN_REQUESTS": "many"},
 	}
 
 	for name, vars := range cases {

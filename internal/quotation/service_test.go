@@ -3,7 +3,6 @@ package quotation
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -37,6 +36,24 @@ type fakeQuoter struct {
 	requests   []any
 	concurrent atomic.Int32
 	peak       atomic.Int32
+}
+
+type memoryCache struct {
+	entries map[string][]byte
+	gets    int
+	sets    int
+}
+
+func (c *memoryCache) Get(_ context.Context, key string) ([]byte, bool, error) {
+	c.gets++
+	value, ok := c.entries[key]
+	return value, ok, nil
+}
+
+func (c *memoryCache) Set(_ context.Context, key string, value []byte, _ time.Duration) error {
+	c.sets++
+	c.entries[key] = value
+	return nil
 }
 
 func (f *fakeQuoter) Quote(_ context.Context, p platform.Partner, request any) (partner.Quote, error) {
@@ -97,21 +114,51 @@ func TestQuoteCallsThePartnersSerially(t *testing.T) {
 	}
 }
 
-func TestOnePartnerDownBringsDownTheWholeRequest(t *testing.T) {
+func TestOnePartnerDownReturnsTheAvailableQuotesAsDegraded(t *testing.T) {
 	quoter := &fakeQuoter{premiums: defaultPremiums(), failOn: "partner-flaky"}
 
-	_, err := NewService(threePartners, quoter).Quote(context.Background(), "corretora-a", validRequest())
-	if err == nil {
-		t.Fatal("one partner down and the request answered success — there is a fallback where there should be none")
+	response, err := NewService(threePartners, quoter).Quote(context.Background(), "corretora-a", validRequest())
+	if err != nil {
+		t.Fatalf("Quote: %v", err)
 	}
-
-	var failure *partner.Error
-	if !errors.As(err, &failure) || failure.Partner != "partner-flaky" {
-		t.Fatalf("error %v does not identify the partner that failed", err)
+	if !response.Degraded || response.Source != "partner" {
+		t.Fatalf("response %+v, expected a visible degraded partner response", response)
 	}
+	if len(response.Quotes) != 2 || len(response.UnavailablePartners) != 1 || response.UnavailablePartners[0] != "partner-flaky" {
+		t.Fatalf("fallback response %+v does not identify the partial result", response)
+	}
+	if len(quoter.calls) != 3 {
+		t.Errorf("called %v, expected every partner to be attempted", quoter.calls)
+	}
+}
 
-	if last := quoter.calls[len(quoter.calls)-1]; last != "partner-flaky" {
-		t.Errorf("last partner called was %q, expected partner-flaky", last)
+func TestQuoteCachesByTenantAndNormalizedRisk(t *testing.T) {
+	quoter := &fakeQuoter{premiums: defaultPremiums()}
+	store := &memoryCache{entries: make(map[string][]byte)}
+	service := NewService(
+		threePartners[:1],
+		quoter,
+		WithCache(store, time.Hour),
+	)
+	request := validRequest()
+
+	first, err := service.Quote(context.Background(), "corretora-a", request)
+	if err != nil || first.Source != "partner" {
+		t.Fatalf("first quote = %+v, %v", first, err)
+	}
+	second, err := service.Quote(context.Background(), "corretora-a", request)
+	if err != nil || second.Source != "cache" {
+		t.Fatalf("second quote = %+v, %v", second, err)
+	}
+	third, err := service.Quote(context.Background(), "corretora-b", request)
+	if err != nil || third.Source != "partner" {
+		t.Fatalf("other tenant quote = %+v, %v", third, err)
+	}
+	if len(quoter.calls) != 2 {
+		t.Fatalf("partner was called %d times, expected one call per tenant", len(quoter.calls))
+	}
+	if len(store.entries) != 2 {
+		t.Fatalf("cache has %d entries, expected tenant-isolated entries", len(store.entries))
 	}
 }
 

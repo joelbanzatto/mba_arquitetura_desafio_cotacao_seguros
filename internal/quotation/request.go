@@ -62,7 +62,11 @@ type partnerRequest struct {
 }
 
 type Response struct {
-	TenantID  string          `json:"tenant_id"`
-	Quotes    []partner.Quote `json:"quotes"`
-	ElapsedMs int64           `json:"elapsed_ms"`
+	TenantID            string          `json:"tenant_id"`
+	Quotes              []partner.Quote `json:"quotes"`
+	ElapsedMs           int64           `json:"elapsed_ms"`
+	Source              string          `json:"source"`
+	Degraded            bool            `json:"degraded"`
+	UnavailablePartners []string        `json:"unavailable_partners,omitempty"`
+	CacheAgeSeconds     int64           `json:"cache_age_seconds,omitempty"`
 }

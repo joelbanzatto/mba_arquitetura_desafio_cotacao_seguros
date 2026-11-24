@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/GuilhermeOliveira591/mba_arquitetura_desafio_cotacao_seguros/internal/cache"
 	"github.com/GuilhermeOliveira591/mba_arquitetura_desafio_cotacao_seguros/internal/partner"
 	"github.com/GuilhermeOliveira591/mba_arquitetura_desafio_cotacao_seguros/internal/platform"
 	"github.com/GuilhermeOliveira591/mba_arquitetura_desafio_cotacao_seguros/internal/quotation"
@@ -28,9 +29,20 @@ func main() {
 	if err != nil {
 		log.Fatalf("telemetry: %v", err)
 	}
+	metrics, err := platform.NewResilienceMetrics()
+	if err != nil {
+		log.Fatalf("resilience metrics: %v", err)
+	}
+	quotationCache := cache.NewRedisStore(cfg.Resilience.RedisAddress)
+	defer func() { _ = quotationCache.Close() }()
 
 	api := quotation.NewAPI(
-		quotation.NewService(cfg.Partners, partner.NewClient()),
+		quotation.NewService(
+			cfg.Partners,
+			partner.NewClient(cfg.Resilience, metrics),
+			quotation.WithCache(quotationCache, cfg.Resilience.CacheTTL),
+			quotation.WithMetrics(metrics),
+		),
 		cfg.Tenants,
 	)
 
