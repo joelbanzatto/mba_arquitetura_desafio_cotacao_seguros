@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/GuilhermeOliveira591/mba_arquitetura_desafio_cotacao_seguros/internal/platform"
 )
@@ -15,6 +16,19 @@ import (
 func testPartner(h http.Handler) (platform.Partner, func()) {
 	server := httptest.NewServer(h)
 	return platform.Partner{Name: "partner-flaky", BaseURL: server.URL}, server.Close
+}
+
+func resilienceConfig() platform.Resilience {
+	return platform.Resilience{
+		PartnerTimeout:           time.Second,
+		BreakerConsecutiveErrors: 3,
+		BreakerOpenTimeout:       time.Minute,
+		BreakerHalfOpenRequests:  2,
+	}
+}
+
+func newTestClient() *Client {
+	return NewClient(resilienceConfig(), nil)
 }
 
 func TestQuoteReadsThePartnerResponse(t *testing.T) {
@@ -32,7 +46,7 @@ func TestQuoteReadsThePartnerResponse(t *testing.T) {
 	}))
 	defer closeServer()
 
-	quote, err := NewClient().Quote(context.Background(), p, map[string]string{"broker": "corretora-a"})
+	quote, err := newTestClient().Quote(context.Background(), p, map[string]string{"broker": "corretora-a"})
 	if err != nil {
 		t.Fatalf("Quote: %v", err)
 	}
@@ -60,7 +74,7 @@ func TestQuoteIdentifiesThePartnerThatFailed(t *testing.T) {
 	}))
 	defer closeServer()
 
-	_, err := NewClient().Quote(context.Background(), p, map[string]string{})
+	_, err := newTestClient().Quote(context.Background(), p, map[string]string{})
 	if err == nil {
 		t.Fatal("a 503 from the partner was treated as success")
 	}
@@ -80,7 +94,7 @@ func TestQuoteFailsOnUnreadableResponse(t *testing.T) {
 	}))
 	defer closeServer()
 
-	if _, err := NewClient().Quote(context.Background(), p, map[string]string{}); err == nil {
+	if _, err := newTestClient().Quote(context.Background(), p, map[string]string{}); err == nil {
 		t.Fatal("unreadable response was accepted")
 	}
 }
@@ -94,7 +108,67 @@ func TestQuoteHonoursCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if _, err := NewClient().Quote(ctx, p, map[string]string{}); err == nil {
+	if _, err := newTestClient().Quote(ctx, p, map[string]string{}); err == nil {
 		t.Fatal("cancelled context did not interrupt the call")
+	}
+}
+
+func TestQuoteOpensTheCircuitWithoutCallingThePartnerAgain(t *testing.T) {
+	var calls int
+	p, closeServer := testPartner(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer closeServer()
+
+	config := resilienceConfig()
+	config.BreakerConsecutiveErrors = 2
+	client := NewClient(config, nil)
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, err := client.Quote(context.Background(), p, map[string]string{}); err == nil {
+			t.Fatalf("attempt %d unexpectedly succeeded", attempt+1)
+		}
+	}
+
+	_, err := client.Quote(context.Background(), p, map[string]string{})
+	var failure *Error
+	if !errors.As(err, &failure) || !failure.CircuitOpen {
+		t.Fatalf("third request error %+v, expected circuit-open partner error", err)
+	}
+	if calls != 2 {
+		t.Fatalf("partner received %d calls, expected 2 before the circuit opened", calls)
+	}
+}
+
+func TestQuoteTreatsTimeoutAsBreakerFailure(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	p, closeServer := testPartner(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-release
+	}))
+
+	config := resilienceConfig()
+	config.PartnerTimeout = 10 * time.Millisecond
+	config.BreakerConsecutiveErrors = 1
+	client := NewClient(config, nil)
+	errs := make(chan error, 1)
+	go func() {
+		_, err := client.Quote(context.Background(), p, map[string]string{})
+		errs <- err
+	}()
+	<-started
+	if err := <-errs; err == nil {
+		close(release)
+		closeServer()
+		t.Fatal("partner timeout was treated as success")
+	}
+	close(release)
+	closeServer()
+
+	_, err := client.Quote(context.Background(), p, map[string]string{})
+	var failure *Error
+	if !errors.As(err, &failure) || !failure.CircuitOpen {
+		t.Fatalf("timeout did not open the circuit: %+v", err)
 	}
 }

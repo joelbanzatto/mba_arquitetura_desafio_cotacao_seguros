@@ -42,6 +42,12 @@ services:
       PORT: "8080"
       PARTNER_ENDPOINTS: "partner-slow=http://partner-slow:8080,partner-flaky=http://partner-flaky:8080,partner-degrading=http://partner-degrading:8080"
       TENANTS: "corretora-a,corretora-b"
+      REDIS_ADDRESS: "redis:6379"
+      QUOTE_CACHE_TTL: "1h"
+      PARTNER_TIMEOUT: "2s"
+      BREAKER_CONSECUTIVE_ERRORS: "3"
+      BREAKER_OPEN_TIMEOUT: "30s"
+      BREAKER_HALF_OPEN_REQUESTS: "2"
       # O SDK do OpenTelemetry ja sobe ligado e manda tudo para o Collector — o aluno nao precisa
       # escrever uma linha para ver o trace da requisicao no Jaeger. Para desligar: OTEL_SDK_DISABLED=true.
       OTEL_SERVICE_NAME: quotation-api
@@ -58,6 +64,8 @@ services:
       # o que ela deveria so observar.
       otel-collector:
         condition: service_started
+      redis:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
       interval: 5s
